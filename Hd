@@ -1,0 +1,66 @@
+// server.js
+const express = require('express');
+const fetch = require('node-fetch');
+const cheerio = require('cheerio');
+const helmet = require('helmet');
+const rateLimit = require('express-rate-limit');
+const path = require('path');
+const { URL } = require('url');
+
+const app = express();
+const PORT = process.env.PORT || 3000;
+
+app.use(helmet());
+app.use(express.json());
+app.use(express.urlencoded({ extended: false }));
+
+app.use(rateLimit({ windowMs: 60*1000, max:40, standardHeaders:true, legacyHeaders:false }));
+
+app.use(express.static(path.join(__dirname,'../client/dist')));
+
+function resolveUrl(base, href){
+  try { return new URL(href, base).toString(); }
+  catch(e){ return null; }
+}
+
+app.get('/proxy', async (req,res)=>{
+  const target=req.query.url;
+  if(!target) return res.status(400).send('missing ?url=');
+  let targetUrl;
+  try { targetUrl=new URL(target); } catch(e){ return res.status(400).send('invalid url'); }
+  if(!['http:','https:'].includes(targetUrl.protocol)) return res.status(400).send('unsupported protocol');
+  const rawMode = req.query.raw==='1';
+  const headers={ 'user-agent':req.headers['user-agent']||'Mozilla/5.0', 'accept':req.headers['accept']||'*/*' };
+  let upstream;
+  try { upstream=await fetch(targetUrl.toString(),{method:'GET',headers,redirect:'follow',timeout:15000}); } 
+  catch(err){ console.error(err && err.message); return res.status(502).send('Failed to fetch target'); }
+  const contentType = upstream.headers.get('content-type')||'';
+  if(rawMode||!contentType.includes('text/html')){
+    res.status(upstream.status);
+    if(upstream.headers.get('content-type')) res.set('Content-Type', upstream.headers.get('content-type'));
+    upstream.body.pipe(res);
+    return;
+  }
+  const body = await upstream.text();
+  const $ = cheerio.load(body,{decodeEntities:false});
+  const baseHref = $('base').attr('href') || targetUrl.toString();
+  function rewrite(el,attr){
+    const val=$(el).attr(attr); if(!val) return;
+    const abs=resolveUrl(baseHref,val); if(!abs) return;
+    let prox='/proxy?url='+encodeURIComponent(abs);
+    if(/\.(js|css|png|jpe?g|gif|webp|svg|ico|woff2?|ttf)(?:[?#].*)?$/i.test(abs)) prox+='&raw=1';
+    $(el).attr(attr,prox);
+  }
+  $('a').each((i,el)=>rewrite(el,'href'));
+  $('img').each((i,el)=>rewrite(el,'src'));
+  $('script').each((i,el)=>rewrite(el,'src'));
+  $('link').each((i,el)=>rewrite(el,'href'));
+  $('iframe').each((i,el)=>rewrite(el,'src'));
+  $('form').each((i,el)=>rewrite(el,'action'));
+  $('body').prepend(`<div style="position:fixed;top:0;left:0;right:0;z-index:9999;padding:8px;background:#0b1220;color:#fff;font-family:system-ui,Segoe UI,Roboto;">Proxied: <strong>${targetUrl.origin}</strong> — <a href="/" style="color:#9cd">home</a></div><div style="height:44px"></div>`);
+  res.set('Content-Type','text/html; charset=utf-8').status(upstream.status).send($.html());
+});
+
+app.get('*',(req,res)=>res.sendFile(path.join(__dirname,'../client/dist/index.html')));
+
+app.listen(PORT,()=>console.log('Server listening on http://localhost:'+PORT));
