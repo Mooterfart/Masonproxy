@@ -1,0 +1,8 @@
+# Simple Proxy Site
+
+StackBlitz/GitHub-ready proxy. Run:
+
+npm run build
+npm start
+
+Then open the live URL.
